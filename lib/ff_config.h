@@ -156,6 +156,8 @@ struct ff_config {
         int vlan_strip;
         int symmetric_rss;
 
+        int init_eal;
+
         /* sleep x microseconds when no pkts incomming */
         unsigned idle_sleep;
 

@@ -55,10 +55,10 @@
 #include <rte_eth_bond.h>
 #include <rte_eth_bond_8023ad.h>
 
+#include "ff_config.h"
 #include "ff_dpdk_if.h"
 #include "ff_dpdk_pcap.h"
 #include "ff_dpdk_kni.h"
-#include "ff_config.h"
 #include "ff_veth.h"
 #include "ff_host_interface.h"
 #include "ff_msg.h"
@@ -1195,10 +1195,14 @@ ff_dpdk_init(int argc, char **argv)
         exit(1);
     }
 
-    int ret = rte_eal_init(argc, argv);
-    if (ret < 0) {
-        rte_exit(EXIT_FAILURE, "Error with EAL initialization\n");
+    int ret = 0;
+    if (ff_global_cfg.dpdk.init_eal) {
+        ret = rte_eal_init(argc, argv);
+        if (ret < 0) {
+            rte_exit(EXIT_FAILURE, "Error with EAL initialization\n");
+        }
     }
+    
 
     numa_on = ff_global_cfg.dpdk.numa_on;
 
@@ -1982,137 +1986,127 @@ ff_dpdk_if_send(struct ff_dpdk_if_context *ctx, void *m,
     return send_single_packet(head, ctx->port_id);
 }
 
-static int
-main_loop(void *arg)
-{
-    struct loop_routine *lr = (struct loop_routine *)arg;
-
-    struct rte_mbuf *pkts_burst[MAX_PKT_BURST];
-    uint64_t prev_tsc, diff_tsc, cur_tsc, usch_tsc, div_tsc, usr_tsc, sys_tsc, end_tsc, idle_sleep_tsc;
-    int i, j, nb_rx, idle;
-    uint16_t port_id, queue_id;
-    struct lcore_conf *qconf;
-    uint64_t drain_tsc = 0;
-    struct ff_dpdk_if_context *ctx;
-
+void init_thread_context(struct ff_thread_context_t* thread_context, struct loop_routine* lr) {
     if (pkt_tx_delay) {
-        drain_tsc = (rte_get_tsc_hz() + US_PER_S - 1) / US_PER_S * pkt_tx_delay;
+        thread_context->drain_tsc = (rte_get_tsc_hz() + US_PER_S - 1) / US_PER_S * pkt_tx_delay;
     }
 
-    prev_tsc = 0;
-    usch_tsc = 0;
+    thread_context->prev_tsc = 0;
+    thread_context->usch_tsc = 0;
+    thread_context->drain_tsc = 0;
+    thread_context->lr = lr;
 
-    qconf = &lcore_conf;
+    thread_context->qconf = &lcore_conf;
+}
 
-    while (1) {
-        cur_tsc = rte_rdtsc();
-        if (unlikely(freebsd_clock.expire < cur_tsc)) {
-            rte_timer_manage();
-        }
+void main_work(struct ff_thread_context_t* thread_context) {
+    int i, j;
 
-        idle = 1;
-        sys_tsc = 0;
-        usr_tsc = 0;
-        usr_cb_tsc = 0;
+    thread_context->cur_tsc = rte_rdtsc();
+    if (unlikely(freebsd_clock.expire < thread_context->cur_tsc)) {
+        rte_timer_manage();
+    }
 
-        /*
-         * TX burst queue drain
-         */
-        diff_tsc = cur_tsc - prev_tsc;
-        if (unlikely(diff_tsc >= drain_tsc)) {
-            for (i = 0; i < qconf->nb_tx_port; i++) {
-                port_id = qconf->tx_port_id[i];
-                if (qconf->tx_mbufs[port_id].len == 0)
-                    continue;
+    thread_context->idle = 1;
+    thread_context->sys_tsc = 0;
+    thread_context->usr_tsc = 0;
+    usr_cb_tsc = 0;
 
-                idle = 0;
-
-                send_burst(qconf,
-                    qconf->tx_mbufs[port_id].len,
-                    port_id);
-                qconf->tx_mbufs[port_id].len = 0;
-            }
-
-            prev_tsc = cur_tsc;
-        }
-
-        /*
-         * Read packet from RX queues
-         */
-        for (i = 0; i < qconf->nb_rx_queue; ++i) {
-            port_id = qconf->rx_queue_list[i].port_id;
-            queue_id = qconf->rx_queue_list[i].queue_id;
-            ctx = veth_ctx[port_id];
-
-#ifdef FF_KNI
-            if (enable_kni && rte_eal_process_type() == RTE_PROC_PRIMARY) {
-                ff_kni_process(port_id, queue_id, pkts_burst, MAX_PKT_BURST);
-            }
-#endif
-
-            idle &= !process_dispatch_ring(port_id, queue_id, pkts_burst, ctx);
-
-            nb_rx = rte_eth_rx_burst(port_id, queue_id, pkts_burst,
-                MAX_PKT_BURST);
-            if (nb_rx == 0)
+    /*
+        * TX burst queue drain
+        */
+    thread_context->diff_tsc = thread_context->cur_tsc - thread_context->prev_tsc;
+    if (unlikely(thread_context->diff_tsc >= thread_context->drain_tsc)) {
+        for (i = 0; i < thread_context->qconf->nb_tx_port; i++) {
+            thread_context->port_id = thread_context->qconf->tx_port_id[i];
+            if (thread_context->qconf->tx_mbufs[thread_context->port_id].len == 0)
                 continue;
 
-            idle = 0;
+            thread_context->idle = 0;
 
-            /* Prefetch first packets */
-            for (j = 0; j < PREFETCH_OFFSET && j < nb_rx; j++) {
-                rte_prefetch0(rte_pktmbuf_mtod(
-                        pkts_burst[j], void *));
-            }
-
-            /* Prefetch and handle already prefetched packets */
-            for (j = 0; j < (nb_rx - PREFETCH_OFFSET); j++) {
-                rte_prefetch0(rte_pktmbuf_mtod(pkts_burst[
-                        j + PREFETCH_OFFSET], void *));
-                process_packets(port_id, queue_id, &pkts_burst[j], 1, ctx, 0);
-            }
-
-            /* Handle remaining prefetched packets */
-            for (; j < nb_rx; j++) {
-                process_packets(port_id, queue_id, &pkts_burst[j], 1, ctx, 0);
-            }
+            send_burst(thread_context->qconf,
+                thread_context->qconf->tx_mbufs[thread_context->port_id].len,
+                thread_context->port_id);
+            thread_context->qconf->tx_mbufs[thread_context->port_id].len = 0;
         }
 
-        process_msg_ring(qconf->proc_id, pkts_burst);
-
-        div_tsc = rte_rdtsc();
-
-        if (likely(lr->loop != NULL && (!idle || cur_tsc - usch_tsc >= drain_tsc))) {
-            usch_tsc = cur_tsc;
-            lr->loop(lr->arg);
-        }
-
-        idle_sleep_tsc = rte_rdtsc();
-        if (likely(idle && idle_sleep)) {
-            usleep(idle_sleep);
-            end_tsc = rte_rdtsc();
-        } else {
-            end_tsc = idle_sleep_tsc;
-        }
-
-        usr_tsc = usr_cb_tsc;
-        if (usch_tsc == cur_tsc) {
-            usr_tsc += idle_sleep_tsc - div_tsc;
-        }
-
-        if (!idle) {
-            sys_tsc = div_tsc - cur_tsc - usr_cb_tsc;
-            ff_top_status.sys_tsc += sys_tsc;
-        }
-
-        ff_top_status.usr_tsc += usr_tsc;
-        ff_top_status.work_tsc += end_tsc - cur_tsc;
-        ff_top_status.idle_tsc += end_tsc - cur_tsc - usr_tsc - sys_tsc;
-
-        ff_top_status.loops++;
+        thread_context->prev_tsc = thread_context->cur_tsc;
     }
 
-    return 0;
+    /*
+    * Read packet from RX queues
+    */
+    for (i = 0; i < thread_context->qconf->nb_rx_queue; ++i) {
+        thread_context->port_id = thread_context->qconf->rx_queue_list[i].port_id;
+        thread_context->queue_id = thread_context->qconf->rx_queue_list[i].queue_id;
+        thread_context->ctx = veth_ctx[thread_context->port_id];
+
+#ifdef FF_KNI
+        if (enable_kni && rte_eal_process_type() == RTE_PROC_PRIMARY) {
+            ff_kni_process(thread_context->port_id, thread_context->queue_id, thread_context->pkts_burst, MAX_PKT_BURST);
+        }
+#endif
+
+        thread_context->idle &= !process_dispatch_ring(thread_context->port_id, thread_context->queue_id, thread_context->pkts_burst, thread_context->ctx);
+
+        thread_context->nb_rx = rte_eth_rx_burst(thread_context->port_id, thread_context->queue_id, thread_context->pkts_burst,
+            MAX_PKT_BURST);
+        if (thread_context->nb_rx == 0)
+            continue;
+
+        thread_context->idle = 0;
+
+        /* Prefetch first packets */
+        for (j = 0; j < PREFETCH_OFFSET && j < thread_context->nb_rx; j++) {
+            rte_prefetch0(rte_pktmbuf_mtod(
+                    thread_context->pkts_burst[j], void *));
+        }
+
+        /* Prefetch and handle already prefetched packets */
+        for (j = 0; j < (thread_context->nb_rx - PREFETCH_OFFSET); j++) {
+            rte_prefetch0(rte_pktmbuf_mtod(thread_context->pkts_burst[
+                    j + PREFETCH_OFFSET], void *));
+            process_packets(thread_context->port_id, thread_context->queue_id, &thread_context->pkts_burst[j], 1, thread_context->ctx, 0);
+        }
+
+        /* Handle remaining prefetched packets */
+        for (; j < thread_context->nb_rx; j++) {
+            process_packets(thread_context->port_id, thread_context->queue_id, &thread_context->pkts_burst[j], 1, thread_context->ctx, 0);
+        }
+    }
+
+    process_msg_ring(thread_context->qconf->proc_id, thread_context->pkts_burst);
+
+    thread_context->div_tsc = rte_rdtsc();
+
+    if (likely(thread_context->lr != NULL && thread_context->lr->loop != NULL && (!thread_context->idle || thread_context->cur_tsc - thread_context->usch_tsc >= thread_context->drain_tsc))) {
+        thread_context->usch_tsc = thread_context->cur_tsc;
+        thread_context->lr->loop(thread_context->lr->arg);
+    }
+
+    thread_context->idle_sleep_tsc = rte_rdtsc();
+    if (likely(thread_context->idle && idle_sleep)) {
+        usleep(idle_sleep);
+        thread_context->end_tsc = rte_rdtsc();
+    } else {
+        thread_context->end_tsc = thread_context->idle_sleep_tsc;
+    }
+
+    thread_context->usr_tsc = usr_cb_tsc;
+    if (thread_context->usch_tsc == thread_context->cur_tsc) {
+        thread_context->usr_tsc += thread_context->idle_sleep_tsc - thread_context->div_tsc;
+    }
+
+    if (!thread_context->idle) {
+        thread_context->sys_tsc = thread_context->div_tsc - thread_context->cur_tsc - usr_cb_tsc;
+        ff_top_status.sys_tsc += thread_context->sys_tsc;
+    }
+
+    ff_top_status.usr_tsc += thread_context->usr_tsc;
+    ff_top_status.work_tsc += thread_context->end_tsc - thread_context->cur_tsc;
+    ff_top_status.idle_tsc += thread_context->end_tsc - thread_context->cur_tsc - thread_context->usr_tsc - thread_context->sys_tsc;
+
+    ff_top_status.loops++;
 }
 
 int
@@ -2127,6 +2121,19 @@ ff_dpdk_if_up(void) {
         if (veth_ctx[port_id] == NULL) {
             rte_exit(EXIT_FAILURE, "ff_veth_attach failed");
         }
+    }
+
+    return 0;
+}
+
+static int
+main_loop(void *arg)
+{
+    struct ff_thread_context_t ff_thread_context;
+    init_thread_context(&ff_thread_context, (struct loop_routine *)arg);
+
+    while (1) {
+        main_work(&ff_thread_context);
     }
 
     return 0;

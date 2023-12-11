@@ -36,6 +36,17 @@ struct loop_routine {
     void *arg;
 };
 
+struct ff_thread_context_t {
+    struct loop_routine *lr;
+    struct rte_mbuf *pkts_burst[MAX_PKT_BURST];
+    uint64_t prev_tsc, diff_tsc, cur_tsc, usch_tsc, div_tsc, usr_tsc, sys_tsc, end_tsc, idle_sleep_tsc;
+    int nb_rx, idle;
+    uint16_t port_id, queue_id;
+    struct lcore_conf *qconf;
+    uint64_t drain_tsc;
+    struct ff_dpdk_if_context *ctx;
+};
+
 int ff_dpdk_init(int argc, char **argv);
 int ff_dpdk_if_up(void);
 void ff_dpdk_run(loop_func_t loop, void *arg);
@@ -60,6 +71,9 @@ void ff_dpdk_set_if(struct ff_dpdk_if_context *ctx, void *sc, void *ifp);
 int ff_dpdk_if_send(struct ff_dpdk_if_context* ctx, void *buf, int total);
 
 void ff_dpdk_pktmbuf_free(void *m);
+
+void init_thread_context(struct ff_thread_context_t* thread_context, struct loop_routine* lr);
+void main_work(struct ff_thread_context_t* thread_context);
 
 
 #endif /* ifndef _FSTACK_DPDK_IF_H */

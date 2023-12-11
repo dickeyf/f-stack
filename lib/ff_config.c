@@ -658,6 +658,8 @@ ini_parse_handler(void* user, const char* section, const char* name,
     #define MATCH(s, n) strcmp(section, s) == 0 && strcmp(name, n) == 0
     if (MATCH("dpdk", "log_level")) {
         pconfig->dpdk.log_level = atoi(value);
+    } else if (MATCH("dpdk", "init_eal")) {
+        pconfig->dpdk.init_eal = atoi(value);
     } else if (MATCH("dpdk", "channel")) {
         pconfig->dpdk.nb_channel = atoi(value);
     } else if (MATCH("dpdk", "memory")) {
@@ -1034,6 +1036,7 @@ ff_default_config(struct ff_config *cfg)
     cfg->dpdk.numa_on = 1;
     cfg->dpdk.promiscuous = 1;
     cfg->dpdk.pkt_tx_delay = BURST_TX_DRAIN_US;
+    cfg->dpdk.init_eal = 1;
 
     cfg->freebsd.hz = 100;
     cfg->freebsd.physmem = 1048576*256;
