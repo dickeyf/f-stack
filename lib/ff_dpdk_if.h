@@ -72,8 +72,8 @@ int ff_dpdk_if_send(struct ff_dpdk_if_context* ctx, void *buf, int total);
 
 void ff_dpdk_pktmbuf_free(void *m);
 
-void init_thread_context(struct ff_thread_context_t* thread_context, struct loop_routine* lr);
-void main_work(struct ff_thread_context_t* thread_context);
+void ff_init_thread_context(struct ff_thread_context_t* thread_context, struct loop_routine* lr);
+void ff_main_work(struct ff_thread_context_t* thread_context);
 
 
 #endif /* ifndef _FSTACK_DPDK_IF_H */

@@ -1986,7 +1986,7 @@ ff_dpdk_if_send(struct ff_dpdk_if_context *ctx, void *m,
     return send_single_packet(head, ctx->port_id);
 }
 
-void init_thread_context(struct ff_thread_context_t* thread_context, struct loop_routine* lr) {
+void ff_init_thread_context(struct ff_thread_context_t* thread_context, struct loop_routine* lr) {
     if (pkt_tx_delay) {
         thread_context->drain_tsc = (rte_get_tsc_hz() + US_PER_S - 1) / US_PER_S * pkt_tx_delay;
     }
@@ -1999,7 +1999,7 @@ void init_thread_context(struct ff_thread_context_t* thread_context, struct loop
     thread_context->qconf = &lcore_conf;
 }
 
-void main_work(struct ff_thread_context_t* thread_context) {
+void ff_main_work(struct ff_thread_context_t* thread_context) {
     int i, j;
 
     thread_context->cur_tsc = rte_rdtsc();
@@ -2130,10 +2130,10 @@ static int
 main_loop(void *arg)
 {
     struct ff_thread_context_t ff_thread_context;
-    init_thread_context(&ff_thread_context, (struct loop_routine *)arg);
+    ff_init_thread_context(&ff_thread_context, (struct loop_routine *)arg);
 
     while (1) {
-        main_work(&ff_thread_context);
+        ff_main_work(&ff_thread_context);
     }
 
     return 0;
